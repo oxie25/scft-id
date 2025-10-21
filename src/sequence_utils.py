@@ -118,6 +118,22 @@ def multiblock_taper(p):
 
     return block
 
+def multiblock_poly(p):
+    # This is for multiblock with polynomial tapers - hardcoded for a quartic polynomial
+    # p has shape (1 + 4 + Ndim, Nblock)
+    N = GLOBAL_NS
+    poly_degree = 4
+    f = p[0, :] # First row is now f
+    poly_coeff = p[1:1+poly_degree, :] # All other rows are polynomial coefficients, the first row is the zeroth coefficient (height), so the minimum dimension is always 2
+    mag = p[1+poly_degree:, :] # Heights
+
+    spts = jnp.linspace(0, 1, N)[:, None]  # (N,1)
+
+    # We need to use the sigmoid approximation, then sample at the discretized points
+    block = multiblock_tophat_poly(f, mag, poly_coeff, spts)
+
+    return block    
+
 
 def multiblock_tophat(logits, heights, x, sharpness=100.0):
     # 1) partition fractions
@@ -179,6 +195,45 @@ def multiblock_tophat_slope(logits, heights, slopes, x, sharpness=100.0):
     mask_exp = mask[:, None, :]  # (N, 1, D)
     weighted = values * mask_exp  # (N, R, D)
     profiles = weighted.sum(axis=-1)  # (N, R)
+
+    return profiles
+
+def multiblock_tophat_poly(logits, heights, coeff, x, sharpness=100.0):
+    # N is number of points
+    # D is block number
+    # R is dimensions (chemical identity)
+    # coeff has dim (poly_degree, D)
+    # heights has dim (R, D)
+    f = jax.nn.softmax(logits)                     # (D,)
+    b = jnp.concatenate([jnp.array([0.]), jnp.cumsum(f)])  # (D+1,)
+
+    left  = jax.nn.sigmoid(sharpness * (x - b[:-1][None, :]))  # (N,D)
+    right = jax.nn.sigmoid(sharpness * (b[1:][None, :] - x))   # (N,D)
+
+    left = left.at[:, 0].set(1.0)
+    right = right.at[:, -1].set(1.0)
+
+    mask = left * right                   # (N,D)
+    mask = mask / (mask.sum(axis=1, keepdims=True) + 1e-8)
+
+    # Compute polynomial for each block at each x
+    x_minus_bd = x - b[:-1][None, :]          # (N,D)
+    
+    # Compute polynomial terms: x_minus_bd^k for k=1,2,...,poly_degree
+    poly_terms = jnp.power(x_minus_bd[:, :, None], jnp.arange(1, coeff.shape[0] + 1)[None, None, :])  # (N, D, poly_degree)
+    poly_offset = jnp.sum(coeff[None, :, :].transpose(0, 2, 1) * poly_terms, axis=-1)  # (N, D)
+
+    # Add polynomial offset to base heights
+    # heights: (R, D), poly_offset: (N, D)
+    # Want final shape: (N, R, D)
+    heights_exp = heights[None, :, :]         # (1, R, D)
+    poly_offset_exp = poly_offset[:, None, :]  # (N, 1, D)
+    values = heights_exp + poly_offset_exp    # (N, R, D)
+
+    # Apply mask
+    mask_exp = mask[:, None, :]               # (N, 1, D)
+    weighted = values * mask_exp              # (N, R, D)
+    profiles = weighted.sum(axis=-1)          # (N, R)
 
     return profiles
 

@@ -61,6 +61,7 @@ figures/*
 !converged_structures/README.md
 !structures/README.md
 !converged_structures/id_target_o70.npy
+!converged_structures/id_target_pm-3m_micelle.npy
 !space_group_info.csv
 !structures/sgGenerator.m
 !structures/MATLAB_utils

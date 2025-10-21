@@ -83,6 +83,11 @@ class Analysis:
             )
         else:
             print("Provided file is not a pickle file. Only valid method is plotPhi")
+            # Get plotting parameters
+            self.font = "Arial"  # Default font for plotting
+            self.font_size = 14  # Default font size for plotting
+            
+            return
 
         # Get plotting parameters
         self.font = "Arial"  # Default font for plotting
@@ -108,9 +113,14 @@ class Analysis:
         elif block_type == "multiblock_taper":
             self.Ndim = f_basis.shape[0] - 2
             self.Np = f_basis.shape[1]  # Number of points in the sequence
+        elif block_type == "multiblock_poly":
+            self.Ndim = f_basis.shape[0] - 5 # This is currently hardcoded to work for a quartic polynomial
+            self.Np = f_basis.shape[1]  # Number of points in the sequence
         elif block_type == "no_transform" and self.basis == "chebyshev_basis":
             self.Ndim = f_basis.shape[1]
             self.Np = f_basis.shape[0]
+        else:
+            raise ValueError("Block type not recognized.")
 
     def evaluate(self, x, sg: str, value: str, f_basis=None):
         from src.scft import SCFT
@@ -206,6 +216,66 @@ class Analysis:
             )
 
         return flag, free_energies_dif, w_error, free_energy_target
+    
+    def determineChiMicelle(
+        self
+    ):
+        # Calculate the block chi and the chi with the solvent for a micelle structure - only id supported
+        from src.sequence import Sequence
+        from src.sequence_utils import calculate_fractions
+        from src.scft_utils import pairwise
+
+        # Extract the f_basis from x_id and x_ns
+        f_basis_id = self.id_x.get("f_basis", None)
+        solvent = self.id_x.get("solvent", 0)
+
+        # The first row of f_basis is the block fractions after passing through calculate_fractions
+        block_frac_id = np.array(calculate_fractions(f_basis_id[0, :]))
+
+        # Find the sequence
+        sequenceClass = Sequence.generate(
+            name="test",
+            basis=self.basis,
+            transform=self.block_type,
+            Nbasis=self.Nbasis,
+            Np=self.Np,
+            Ndim=self.Ndim,
+            f_params=f_basis_id,
+        )
+
+        # This only works for block copolymers, no other changes needed
+        seq_id = sequenceClass.transform_fun(f_basis_id)
+
+        lss_id = np.array(pairwise(seq_id))
+
+        fractions = block_frac_id
+        # Number of blocks
+        n_blocks = len(fractions)
+
+        # Generate the pairwise combinations
+        block_index, _ = self._find_indices_for_block(fractions)
+        pairwise_combinations = self._generate_pairwise_combinations(n_blocks)
+
+        # block_index is a dictionary. Now for each pair in pairwise_combinations, we can find the indices for each block, Use this to sample from lss to find the appropriate chi
+        chi_matrix = np.zeros((n_blocks, n_blocks))
+        for pair in pairwise_combinations:
+            block1, block2 = pair
+            index_block1 = block_index[block1]
+            index_block2 = block_index[block2]
+            sampled_values = lss_id[index_block1, index_block2]
+            chi_matrix[block2, block1] = (
+                sampled_values  # Fill only the lower diagonal
+            )
+        
+        # Now calculate the chi with the solvent for each block. The solvent is 'solvent' and taking the square difference between seq_id and solvent generates the chi with solvent
+        solvent_chi = np.mean((np.array(seq_id) - np.array(solvent)) ** 2, -1) # This is a column array of chi with solvent for each point in the sequence
+        block_solvent_chi = np.zeros((n_blocks,))
+        for block in range(n_blocks):
+            index_block = block_index[block]
+            sampled_values = solvent_chi[index_block]  # Solvent is the last index
+            block_solvent_chi[block] = sampled_values
+
+        return chi_matrix, block_solvent_chi, seq_id
 
     def plotTrajectory(
         self,
@@ -617,31 +687,42 @@ class Analysis:
         from src.sequence_utils import calculate_fractions
         from src.scft_utils import pairwise
 
+        
         # Extract the f_basis from x_id and x_ns
-        f_basis_id = self.id_x.get("f_basis", None)
-        f_basis_ns = self.negative_x.get("f_basis", None)
+        if stage == 'id':
+            f_basis_id = self.id_x.get("f_basis", None)
+            # The first row of f_basis is the block fractions after passing through calculate_fractions
+            block_frac_id = np.array(calculate_fractions(f_basis_id[0, :]))
+            # Find the sequence
+            sequenceClass = Sequence.generate(
+                name="test",
+                basis=self.basis,
+                transform=self.block_type,
+                Nbasis=self.Nbasis,
+                Np=self.Np,
+                Ndim=self.Ndim,
+                f_params=f_basis_id,
+            )
+            seq_id = sequenceClass.transform_fun(f_basis_id)
+            lss_id = np.array(pairwise(seq_id))
+        elif stage == 'ns':
+            f_basis_ns = self.negative_x.get("f_basis", None)
+            block_frac_ns = np.array(calculate_fractions(f_basis_ns[0, :]))
+            # Find the sequence
+            sequenceClass = Sequence.generate(
+                name="test",
+                basis=self.basis,
+                transform=self.block_type,
+                Nbasis=self.Nbasis,
+                Np=self.Np,
+                Ndim=self.Ndim,
+                f_params=f_basis_ns,
+            )
+            seq_ns = sequenceClass.transform_fun(f_basis_ns)
+            lss_ns = np.array(pairwise(seq_ns))
+        else:
+            raise ValueError("Stage must be either 'id' or 'ns'.")
 
-        # The first row of f_basis is the block fractions after passing through calculate_fractions
-        block_frac_id = np.array(calculate_fractions(f_basis_id[0, :]))
-        block_frac_ns = np.array(calculate_fractions(f_basis_ns[0, :]))
-
-        # Find the sequence
-        sequenceClass = Sequence.generate(
-            name="test",
-            basis=self.basis,
-            transform=self.block_type,
-            Nbasis=self.Nbasis,
-            Np=self.Np,
-            Ndim=self.Ndim,
-            f_params=f_basis_id,
-        )
-
-        # This only works for block copolymers, no other changes needed
-        seq_id = sequenceClass.transform_fun(f_basis_id)
-        seq_ns = sequenceClass.transform_fun(f_basis_ns)
-
-        lss_id = np.array(pairwise(seq_id))
-        lss_ns = np.array(pairwise(seq_ns))
 
         # If stage is 'id', we use the id fractions and chi matrix, otherwise we use the ns fractions and chi matrix
         if stage == "id":
@@ -738,7 +819,7 @@ class Analysis:
         plt.savefig(filepath, dpi=1200, bbox_inches="tight", transparent=True)
         plt.show()
 
-    def plotEnergy(self, file_name: str, block_type: str, stage: str, sg_dict: dict):
+    def plotEnergy(self, file_name: str, stage: str, sg_dict: dict):
         import matplotlib.pyplot as plt
 
         target_sg = sg_dict[
@@ -991,6 +1072,236 @@ class Analysis:
                 raise ValueError(
                     "Block must be None, an integer, or a tuple of (start, stop) indices"
                 )
+
+            # Find total number of waves
+            Nwaves = np.shape(h2ijk)[0]
+
+            # This is the plotting code
+            # Initialize class
+            TargetIsoSurface = IsosurfacePlotter(phi_hat, param)
+
+            # Generate coordinate grid
+            TargetIsoSurface.generate_coordinate_grid()
+
+            # Generate geometry
+            TargetIsoSurface.generate_geometry()
+
+            # Generate Cartesian grid
+            X, Y, Z, M = TargetIsoSurface.generate_cartesian_grid()
+
+            # Convert field to 3D
+            F = TargetIsoSurface.field_to_cartesian(tauIdx, h2ijk, Nwaves, matlab=True)
+
+            # Prepare plotter
+            plotter = pv.Plotter(off_screen=bool(file_name))
+            plotter.enable_anti_aliasing("msaa")
+
+            if method == "volume":
+                # Use the isovolume method
+                TargetIsoSurface.isovolume(
+                    plotter=plotter, min_clim=cmin, max_clim=cmax
+                )
+
+                if file_name:
+                    if block is not None:
+                        screenshot_path = (
+                            FIGURES_DIR / f"{file_name}_{key}_block_{block}.png"
+                        )
+                    else:
+                        screenshot_path = (
+                            FIGURES_DIR / f"{file_name}_{key}_identity.png"
+                        )
+                    plotter.screenshot(
+                        screenshot_path, return_img=False, window_size=[1920, 1080]
+                    )
+                else:
+                    plotter.show()
+            elif method == "surface":
+                # Use the filled method
+                # Prepare plotter
+                plotter = pv.Plotter(off_screen=bool(file_name))
+                plotter.enable_anti_aliasing("msaa")
+
+                TargetIsoSurface.filled(cutoff=cutoff, plotter=plotter)
+
+                if file_name:
+                    if block is not None:
+                        screenshot_path = (
+                            FIGURES_DIR / f"{file_name}_{key}_block_{block}_filled.png"
+                        )
+                    else:
+                        screenshot_path = (
+                            FIGURES_DIR / f"{file_name}_{key}_identity_filled.png"
+                        )
+                    plotter.screenshot(
+                        screenshot_path, return_img=False, window_size=[1920, 1080]
+                    )
+                else:
+                    plotter.show()
+            elif method == "slice":
+                # Slice the structure
+                TargetIsoSurface.slice2d(plotter=plotter, origin=origin, normal=normal)
+
+                if file_name:
+                    if block is not None:
+                        screenshot_path = (
+                            FIGURES_DIR / f"{file_name}_{key}_block_{block}_slice.png"
+                        )
+                    else:
+                        screenshot_path = (
+                            FIGURES_DIR / f"{file_name}_{key}_identity_slice.png"
+                        )
+                    plotter.screenshot(
+                        screenshot_path, return_img=False, window_size=[1920, 1080]
+                    )
+                else:
+                    plotter.show()
+
+    def plotStructuresMicelle(
+        self,
+        file_name: str,
+        sg_dict: dict,
+        stage: str,
+        method: str,
+        c: float,
+        block=None,
+        cutoff: float = 0.5,
+        cmin: float = 0.0,
+        cmax: float = 1.0,
+        origin: tuple = (0, 0, 0.5),
+        normal: tuple = (0, 0, 1),
+    ):
+        # Specifically for micelles, where for better visualization the density field is divided by c (polymer volume fraction) before plotting
+        # Generate a volume plot of a single structure using pyvista
+        # sg_dict is a dictionary where the keys are the names of the structure and the values are the space group. If the target is the desired structure, the key should be 'target'
+        # block_type is either 'multiblock' or 'multiblock_taper'
+        # stage indicates if it is ns or id
+        # block inidicates which block to plot. If None, plot the identity block
+        import pandas as pd
+        from scipy.io import loadmat
+        from src.plotting_utils import IsosurfacePlotter
+        from src.sequence_utils import calculate_fractions
+        from src.scft_utils import integral, sequence_to_identity
+        import pyvista as pv
+
+        pv.global_theme.allow_empty_mesh = True
+
+
+        # Extract the necessary data
+        psi_dict = {}
+        cell_dict = {}
+        if stage == "id":
+            f_basis = self.id_x.get("f_basis", None)
+            # Get the required space group. Loop through sg_dict
+            for key, sg in sg_dict.items():
+                if key == "target":
+                    psi_dict[key] = self.x_refine.get("psi", None)
+                    cell_dict[key] = self.x_refine.get("cell", None)
+                else:
+                    # look in the alternate structures
+                    psi_dict[key] = self.x_alt_dict.get(f"{key}", {}).get("psi", None)
+                    cell_dict[key] = self.x_alt_dict.get(f"{key}", {}).get("cell", None)
+
+        elif stage == "ns":
+            f_basis = self.negative_x.get("f_basis", None)
+            # Get the required space group. Loop through sg_dict
+            for key, sg in sg_dict.items():
+                if key == "target":
+                    psi_dict[key] = self.x_refine.get("psi", None)
+                    cell_dict[key] = self.x_refine.get("cell", None)
+                else:
+                    # look in the alternate structures
+                    psi_dict[key] = self.x_alt_dict.get(f"{key}", {}).get("psi", None)
+                    cell_dict[key] = self.x_alt_dict.get(f"{key}", {}).get("cell", None)
+        else:
+            raise ValueError("Stage must be either 'id' or 'ns'.")
+
+        # The first row of f_basis is the block fractions after passing through calculate_fractions
+        block_frac = np.array(
+            calculate_fractions(f_basis[0, :])
+        )  # Need to make this numpy
+        _, block_indices_dict = self._find_indices_for_block(block_frac)
+
+        sequenceClass = Sequence.generate(
+            name="test",
+            basis=self.basis,
+            transform=self.block_type,
+            Nbasis=self.Nbasis,
+            Np=self.Np,
+            Ndim=self.Ndim,
+        )
+
+        # Generate the sequence. This is to find the identity function
+        basis_fun = sequenceClass.basis_fun(
+            self.s, self.Nbasis
+        )  # This stores the matrix basis rather than the function. We never need the function itself
+        sequence = sequenceClass.transform_fun(f_basis)
+        sequence = jnp.dot(basis_fun.T, sequence)
+
+        # Set up the space group geometries
+        sg_info_file = PROJECT_ROOT / "space_group_info.csv"
+
+        # For every space group in sg_dict, we need to load the structure and generate the isosurface
+        for key, sg in sg_dict.items():
+            # Load the necessary structure files for plotting
+            tauIdx_file = Path(STRUCTURES_DIR) / f"{sg}_tauIdx.mat"
+            h2ijk_file = Path(STRUCTURES_DIR) / f"{sg}_h2ijk.mat"
+
+            tauIdx_mat = loadmat(tauIdx_file)
+            h2ijk_mat = loadmat(h2ijk_file)
+
+            tauIdx = tauIdx_mat["tauidx"][0]
+            h2ijk = h2ijk_mat["h2ijk"]
+
+            # From the file with space group informaton, we can extract the discretization
+            df_sg_info = pd.read_csv(sg_info_file, index_col=0)
+
+            unit_cell = df_sg_info["Unit Cell"].loc[sg]
+            Nx = df_sg_info["Nx"].loc[sg]
+            Ny = df_sg_info["Ny"].loc[sg]
+            Nz = df_sg_info["Nz"].loc[sg]
+
+            # Get required parameters for the isosurface plotter
+            N = [Nx, Ny, Nz]
+            cell, dim = self._cell_fill(
+                unit_cell, cell_dict[key]
+            )  # Fill the cell based on the unit cell type
+            # the param input is cell lengths, discretization, dimension, and unit cell
+            param = cell, N, dim, unit_cell
+
+            # Calculate the phi for plotting
+            if block is None:
+                # If no block is specified, we calculate the phi for the identity block
+                g_fun = sequence_to_identity(sequence)
+                phi_hat = np.array(
+                    integral(psi_dict[key] * g_fun, sequenceClass.stencil)
+                )  # Make into a numpy array
+            elif isinstance(block, int):
+                # If a specific block is requested, we need to calculate the phi for that block
+                # We can use the block indices. g_fun is zero everywhere except between the block indices
+                start_stop = block_indices_dict[
+                    block
+                ]  # This is a tuple of (start, stop) indices for the block
+                g_fun = jnp.zeros((self.N,))  # Initialize g_fun as a zero array
+                g_fun = g_fun.at[start_stop[0] : start_stop[1]].set(1.0)
+                phi_hat = np.array(
+                    integral(psi_dict[key] * g_fun, sequenceClass.stencil)
+                )  # Make into a numpy array
+            elif isinstance(block, tuple):
+                # If block is a tuple, use the tuple values as start and stop indices
+                start, stop = block
+                g_fun = jnp.zeros((self.N,))  # Initialize g_fun as a zero array
+                g_fun = g_fun.at[start:stop].set(1.0)
+                phi_hat = np.array(
+                    integral(psi_dict[key] * g_fun, sequenceClass.stencil)
+                )  # Make into a numpy array
+            else:
+                raise ValueError(
+                    "Block must be None, an integer, or a tuple of (start, stop) indices"
+                )
+
+            # Divide phi_hat by c (polymer volume fraction) for micelle visualization
+            phi_hat = phi_hat / c
 
             # Find total number of waves
             Nwaves = np.shape(h2ijk)[0]
